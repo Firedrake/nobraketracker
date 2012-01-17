@@ -19,7 +19,7 @@ git clone -v git://firedrake.org/nobraketracker.git/ nobraketracker
 This program has been tested with Perl 5.10.0 and 5.10.1 but should work
 with any reasonably modern Perl.
 
-It relies on these external modules:
+It relies on these non-core modules:
 
 HTTP::Server::Simple
 JSON
@@ -88,6 +88,9 @@ There are several URL paths supported:
 /stats - list stats and peers for torrents (similar to /scrape, but in
 HTML)
 
+By analogy with /scrape, /stats takes an optional info_hash parameter to
+restrict reporting to that torrent.
+
 If a peer connects from one IP address but announces another, /stats
 will report the claimed address followed by the connection address.
 
@@ -117,12 +120,6 @@ No failure-retry support (BEP31).
 
 No peer obfuscation (BEP8).
 
-Sends all peers, not a limited number
-
-Ignores numwant
-
-Doesn't support /scrape with info_hash
-
 =Version history
 
 0.01 - initial release
@@ -136,7 +133,8 @@ Doesn't support /scrape with info_hash
        removed /scan action (use HUP or restart).
 
 0.04 - added noscrape config option;
-       added secret torrent.
+       added secret torrent;
+       added info_hash support to /scrape and /stats.
 
 =Reference
 
