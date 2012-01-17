@@ -1,0 +1,348 @@
+#! /usr/bin/perl -w
+
+use strict;
+use JSON;
+
+my $version='0.03';
+
+my $cfg=$ARGV[0] || 'tracker.cfg';
+my %config;
+{
+  open IN,"<$cfg";
+  if (eof IN) {
+    die "no config file $cfg\n";
+  }
+  binmode IN;
+  my $st=join('',<IN>);
+  close IN;
+  if ($st) {
+    %config=%{decode_json($st)};
+  }
+  my $d=0;
+  foreach my $re (qw(port statefile interval allowed expiry)) {
+    unless (exists $config{$re}) {
+      warn "$re undefined in config\n";
+      $d=1;
+    }
+  }
+  if ($d) {
+    die "Aborting startup\n";
+  }
+}
+
+{
+  package NoBrakeTracker;
+
+  use HTTP::Server::Simple::CGI;
+  use base qw(HTTP::Server::Simple::CGI);
+  use JSON;
+  use Digest::SHA1 qw(sha1);
+  use Convert::Bencode_XS qw(bencode bdecode);
+
+  my %dispatch = (
+    '/announce' => \&resp_tracker,
+    '/stats' => \&resp_stats,
+    '/scrape' => \&resp_scrape,
+  );
+
+  my %state;
+  my %config;
+  my $fh;
+
+  sub config {
+    my $self=shift;
+    my $c=shift;
+    %config=%{$c};
+    if (exists $config{logfile}) {
+      open $fh,">>$config{logfile}";
+    } else {
+      $fh=*STDERR;
+    }
+    autoflush $fh 1;
+    print $fh join(' ',scalar localtime,
+                       'startup'),"\n";
+  }
+
+  sub handle_request {
+    my $self = shift;
+    my $cgi  = shift;
+
+    my $path = $cgi->path_info();
+    my $handler = $dispatch{$path};
+
+    if (ref($handler) eq "CODE") {
+      $handler->($cgi);
+    } else {
+      simple_return($cgi,404,'Not found');
+    }
+  }
+
+  sub resp_tracker {
+    my $cgi  = shift;
+    return if !ref $cgi;
+
+    my %data=map{$_ => scalar $cgi->param($_)} $cgi->param;
+    if (exists $data{ip} && $data{ip} !~ /^(\d+\.){3}\d+$/) {
+      delete $data{ip};
+    }
+    my $extip=$cgi->remote_host;
+    unless (exists $data{ip}) {
+      $data{ip}=$extip;
+    }
+    if (my $c=$cgi->user_agent) {
+      $data{user_agent}=$c;
+    }
+    unless (exists $data{peer_id} && $data{info_hash}) {
+      bencoded_return($cgi,400,'Bad request',{'failure reason' => 'What?'});
+      return;
+    }
+
+    unless ($config{allowed} eq '*' || exists $state{$data{info_hash}}) { # valid hash
+      bencoded_return($cgi,403,'Forbidden',{'failure reason' => 'No such torrent here'});
+      return;
+    }
+
+    if (exists $state{$data{info_hash}}{peer}{$data{peer_id}}) { # we've seen you before
+      if (exists $state{$data{info_hash}}{peer}{$data{peer_id}}{left} &&
+          $state{$data{info_hash}}{peer}{$data{peer_id}}{left} > 0 &&
+          exists $data{left} &&
+          $data{left} == 0) { # but you're now seeding
+        $state{$data{info_hash}}{completed}++;
+      }
+    }
+    $data{lastupdate}=time;
+    if (exists $data{event} &&
+        $data{event} eq 'stopped') {
+      delete $state{$data{info_hash}}{peer}{$data{peer_id}};
+    } else {
+      $state{$data{info_hash}}{peer}{$data{peer_id}}=\%data;
+    }
+
+    &save;
+
+    print $fh join(' ',scalar localtime,
+                       'client',
+		       $data{ip},
+                       hexify($data{peer_id}),
+                       $data{event} || 'no_event'),"\n";
+
+    my %out=(interval => $config{interval},
+             complete => 0,
+             incomplete => 0);
+    foreach my $p (keys %{$state{$data{info_hash}}{peer}}) {
+      if ($state{$data{info_hash}}{peer}{$p}{lastupdate}+$config{expiry} < time) {
+        delete $state{$data{info_hash}}{peer}{$p};
+      } else {
+        if ($state{$data{info_hash}}{peer}{$p}{left}==0) {
+          $out{complete}++;
+        } else {
+          $out{incomplete}++;
+        }
+      }
+    }
+    if (exists $data{compact} && $data{compact}==1) {
+      my $pl='';
+      foreach my $p (keys %{$state{$data{info_hash}}{peer}}) {
+        $pl .= pack('C*',split /\./,$state{$data{info_hash}}{peer}{$p}{ip});
+        $pl .= pack('n',$state{$data{info_hash}}{peer}{$p}{port});
+      }
+      $out{peers}=$pl;
+    } else {
+      my @p;
+      foreach my $p (keys %{$state{$data{info_hash}}{peer}}) {
+        push @p,{'peer id' => $p,
+                 ip        => $state{$data{info_hash}}{peer}{$p}{ip},
+                 port      => $state{$data{info_hash}}{peer}{$p}{port}};
+      }
+      $out{peers}=\@p;
+    }
+    $out{'external ip'}=pack('C*',split /\./,$extip);
+
+
+    print "HTTP/1.0 200 OK\r\n",
+          $cgi->header('text/plain'),
+          bencode(\%out);
+  }
+
+  sub resp_stats {
+    my $cgi  = shift;
+    return if !ref $cgi;
+
+    print "HTTP/1.0 200 OK\r\n",
+          $cgi->header,
+          $cgi->start_html('Stats');
+    print $fh join(' ',scalar localtime,
+                       'stats',
+		       $cgi->remote_host),"\n";
+    my @rows;
+    foreach my $digest (sort keys %state) {
+      push @rows,$cgi->td(['info hash',$cgi->pre(hexify($digest))]),
+                 $cgi->td([size => $state{$digest}{size}]),
+                 $cgi->td([completed => $state{$digest}{completed}]);
+      my @pr=$cgi->th([qw(ip complete up down agent)]);
+      foreach my $p (keys %{$state{$digest}{peer}}) {
+        my $complete=int(100*(1-$state{$digest}{peer}{$p}{left}/$state{$digest}{size}));
+        push @pr,$cgi->td([$state{$digest}{peer}{$p}{ip},
+                           $complete,
+                           $state{$digest}{peer}{$p}{uploaded},
+                           $state{$digest}{peer}{$p}{downloaded},
+                           $state{$digest}{peer}{$p}{user_agent}]);
+      }
+      if (scalar @rows > 1) {
+        push @rows,$cgi->td(['peers',$cgi->table($cgi->Tr(\@pr))]);;
+      }
+    }
+    print $cgi->table($cgi->Tr(\@rows));
+    print $cgi->end_html;
+  }
+
+  sub resp_scrape {
+    my $cgi  = shift;
+    return if !ref $cgi;
+
+    print $fh join(' ',scalar localtime,
+                       'scrape',
+		       $cgi->remote_host),"\n";
+    my %out;
+
+    foreach my $digest (sort keys %state) {
+      my %info=(downloaded => $state{$digest}{completed},
+                complete => 0,
+                incomplete => 0,
+                downloaders => 0);
+      foreach my $p (keys %{$state{$digest}{peer}}) {
+        if ($state{$digest}{peer}{$p}{left}==0) {
+          $info{complete}++;
+        } else {
+          $info{incomplete}++;
+          unless (exists $state{$digest}{peer}{$p}{upload_only} &&
+                  $state{$digest}{peer}{$p}{upload_only}==1 &&
+                  exists $state{$digest}{peer}{$p}{event} &&
+                  exists $state{$digest}{peer}{$p}{event} eq 'paused') {
+            $info{downloaders}++;
+          }
+        }
+      }
+      $out{$digest}=\%info;
+    }
+
+    print "HTTP/1.0 200 OK\r\n",
+          $cgi->header('text/plain'),
+          bencode(\%out);
+  }
+
+  sub restore {
+    open IN,"<$config{statefile}" || return;
+    unless (eof IN) {
+      binmode IN;
+      my $st=join('',<IN>);
+      close IN;
+      if ($st) {
+        %state=%{decode_json($st)};
+      }
+    }
+    &scan;
+  }
+
+  sub scan {
+    my $cgi  = shift;
+    if ($config{allowed} eq '*') {
+      return;
+    }
+    my $d=(opendir D,$config{allowed});
+    unless ($d) {
+      if (ref $cgi) {
+        simple_return($cgi,404,'Not found');
+      }
+      return;
+    }
+    my %found;
+    foreach my $file (map {"$config{allowed}/$_"} grep /\.torrent$/,readdir D) {
+      open I,"<$file";
+      binmode I;
+      my $raw=join('',<I>);
+      close I;
+      my $d=bdecode($raw);
+      my $size=1;
+      if (exists $d->{info}{files}) {
+        $size=0;
+        foreach my $k (@{$d->{info}{files}}) {
+          $size+=$k->{length};
+        }
+      } else {
+        $size=$d->{info}{length} || 1;
+      }
+      my $ih=sha1(bencode($d->{info}));
+      $found{$ih}=$size;
+    }
+    closedir D;
+    foreach my $f (keys %found) {
+      unless (exists $state{$f}) {
+        $state{$f}={size => $found{$f},
+                    completed => 0};
+	print $fh join(' ',scalar localtime,
+                	   'torrent',
+                	   hexify($f),
+                	   'added'),"\n";
+      }
+    }
+    foreach my $f (keys %state) {
+      unless (exists $found{$f}) {
+        delete $state{$f};
+	print $fh join(' ',scalar localtime,
+                	   'torrent',
+			   hexify($f),
+                	   'deleted'),"\n";
+      }
+    }
+    &save;
+  }
+
+  sub save {
+    my $st=encode_json(\%state);
+    open OUT,">$config{statefile}";
+    print OUT $st;
+    close OUT;
+  }
+
+  sub simple_return {
+    my ($cgi,$status,$text)=@_;
+    print "HTTP/1.0 $status $text\r\n",
+          $cgi->header,
+          $cgi->start_html($text),
+          $cgi->h1($text),
+          $cgi->end_html;
+  }
+
+  sub bencoded_return {
+    my ($cgi,$status,$text,$hash)=@_;
+    print "HTTP/1.0 $status $text\r\n",
+          $cgi->header('text/plain'),
+          bencode($hash);
+  }
+
+  sub hexify {
+    my $value=shift;
+    my @shorts=unpack('n10',$value);
+    return join('',map {sprintf('%04X',$_)} @shorts);
+  }
+
+  sub print_banner {
+  }
+
+}
+
+my $nbt = NoBrakeTracker->new($config{port});
+if (exists $config{ip}) {
+  $nbt->host($config{ip});
+}
+$nbt->config(\%config);
+$nbt->restore;
+if (exists $config{pidfile}) {
+  my $pid=$nbt->background;
+  open PID,">$config{pidfile}" || die "Can't open $config{pidfile} to record pid $pid\n";
+  print PID "$pid\n";
+  close PID;
+} else {
+  $nbt->run;
+}
