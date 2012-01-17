@@ -3,7 +3,7 @@
 use strict;
 use JSON;
 
-my $version='0.03';
+my $version='0.04';
 
 my $cfg=$ARGV[0] || 'tracker.cfg';
 my %config;
@@ -40,10 +40,13 @@ my %config;
   use Convert::Bencode_XS qw(bencode bdecode);
 
   my %dispatch = (
-    '/announce' => \&resp_tracker,
-    '/stats' => \&resp_stats,
-    '/scrape' => \&resp_scrape,
+    '/announce' => \&resp_tracker
   );
+
+  if (!exists $config{noscrape}) {
+    $dispatch{'/stats'}=\&resp_stats;
+    $dispatch{'/scrape'}=\&resp_scrape;
+  }
 
   my %state;
   my %config;
@@ -85,9 +88,9 @@ my %config;
     if (exists $data{ip} && $data{ip} !~ /^(\d+\.){3}\d+$/) {
       delete $data{ip};
     }
-    my $extip=$cgi->remote_host;
+    $data{connip}=$cgi->remote_host;
     unless (exists $data{ip}) {
-      $data{ip}=$extip;
+      $data{ip}=$data{connip};
     }
     if (my $c=$cgi->user_agent) {
       $data{user_agent}=$c;
@@ -156,7 +159,7 @@ my %config;
       }
       $out{peers}=\@p;
     }
-    $out{'external ip'}=pack('C*',split /\./,$extip);
+    $out{'external ip'}=pack('C*',split /\./,$data{connip});
 
 
     print "HTTP/1.0 200 OK\r\n",
@@ -182,7 +185,12 @@ my %config;
       my @pr=$cgi->th([qw(ip complete up down agent)]);
       foreach my $p (keys %{$state{$digest}{peer}}) {
         my $complete=int(100*(1-$state{$digest}{peer}{$p}{left}/$state{$digest}{size}));
-        push @pr,$cgi->td([$state{$digest}{peer}{$p}{ip},
+        my $ip=$state{$digest}{peer}{$p}{ip};
+        if (exists $state{$digest}{peer}{$p}{connip} &&
+            $state{$digest}{peer}{$p}{connip} ne $ip) {
+          $ip.="/$state{$digest}{peer}{$p}{connip}";
+        }
+        push @pr,$cgi->td([$ip,
                            $complete,
                            $state{$digest}{peer}{$p}{uploaded},
                            $state{$digest}{peer}{$p}{downloaded},
@@ -257,7 +265,11 @@ my %config;
       return;
     }
     my %found;
-    foreach my $file (map {"$config{allowed}/$_"} grep /\.torrent$/,readdir D) {
+    foreach my $file (map {"$config{allowed}/$_"} grep /\.torrent$/i,readdir D) {
+      my $secret=0;
+      if ($file =~ /\.secret\.torrent$/i) {
+        $secret=1;
+      }
       open I,"<$file";
       binmode I;
       my $raw=join('',<I>);
@@ -279,7 +291,8 @@ my %config;
     foreach my $f (keys %found) {
       unless (exists $state{$f}) {
         $state{$f}={size => $found{$f},
-                    completed => 0};
+                    completed => 0,
+                    secret => $secret};
 	print $fh join(' ',scalar localtime,
                 	   'torrent',
                 	   hexify($f),

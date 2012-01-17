@@ -1,26 +1,23 @@
-TODO
-disable /stats, /scrape
-/scrape + info_hash
-honour numwant
-think about how many peers, and which, to send
-http://wiki.theory.org/BitTorrentSpecification
-
-Introduction
+=Introduction
 
 NoBrakeTracker is a lightweight BitTorrent HTTP tracker written in Perl.
 Goals are basic functionality and a higher code quality than some of the
 competition.
 
-Features
+=Features
 
 Supports all basic BitTorrent functionality (BEP3), scraping (no BEP),
 external IP reporting (BEP24), partial seeding (BEP21), and compact peer
 lists (BEP23).
 
-Prerequisites
+=Updates
 
-This program has been tested with Perl 5.10.1 but should work with any
-reasonably modern Perl.
+git clone -v git://firedrake.org/nobraketracker.git/ nobraketracker
+
+=Prerequisites
+
+This program has been tested with Perl 5.10.0 and 5.10.1 but should work
+with any reasonably modern Perl.
 
 It relies on these external modules:
 
@@ -34,7 +31,7 @@ libjson-perl, libdigest-sha1-perl). Convert::Bencode_XS can be installed
 via CPAN, or for greater ease use dh-make-perl to create a local deb
 that can be installed via dpkg.
 
-Configuration
+=Configuration
 
 The configuration file (tracker.cfg by default) is a JSON file with
 configuration data. A minimal configuration might look like this:
@@ -70,22 +67,31 @@ the tracker and store its PID in this file
 
 logfile (optional) - log to this file rather than STDERR
 
-Operation
+noscrape (optional) - set to 1 to disable /scrape and /stats reporting.
+
+=Operation
 
 Put torrent files into the "allowed" directory; filenames should end
 with ".torrent". To refresh the list of torrents, send a HUP to the
 tracker process (or just stop and restart it - state is saved after each
 client connection and restored on startup).
 
+If a torrent filename ends with ".secret.torrent", it will be excluded
+from /scrape and /stats announcements unless its info-hash is given.
+
 Give the configuration file as a command line parameter.
 
 There are several URL paths supported:
 
 /announce - normal tracker functionality
-/stats - list stats and peers for live torrents
 /scrape - standardised scraping
+/stats - list stats and peers for torrents (similar to /scrape, but in
+HTML)
 
-Logging
+If a peer connects from one IP address but announces another, /stats
+will report the claimed address followed by the connection address.
+
+=Logging
 
 Log lines are space-separated and take the form:
 
@@ -96,7 +102,7 @@ has used the tracker), "torrent" (a torrent has been added or rmeoved),
 "stats" (a stats request has been made), or "scrape" (a scrape request
 has been made).
 
-Bugs
+=Bugs
 
 Running in open mode will probably exhaust resources since torrents
 don't expire.
@@ -107,15 +113,17 @@ No IPv6 support (BEP7).
 
 No SSL support.
 
-No private torrent support (BEP27).
-
 No failure-retry support (BEP31).
 
 No peer obfuscation (BEP8).
 
-Stats don't report divergent IP addresses.
+Sends all peers, not a limited number
 
-Version history
+Ignores numwant
+
+Doesn't support /scrape with info_hash
+
+=Version history
 
 0.01 - initial release
 
@@ -127,7 +135,11 @@ Version history
        added partial seed support (BEP 21);
        removed /scan action (use HUP or restart).
 
-Reference
+0.04 - added noscrape config option;
+       added secret torrent.
+
+=Reference
 
 http://www.bittorrent.org/beps/bep_0003.html
 http://www.morehawes.co.uk/the-bittorrent-protocol
+http://wiki.theory.org/BitTorrentSpecification
