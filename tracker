@@ -2,6 +2,7 @@
 
 use strict;
 use JSON;
+use LockFile::Simple qw(lock unlock);
 
 my $version='0.04';
 
@@ -40,6 +41,11 @@ my %config;
   use Clone qw(clone);
   use List::Util qw(shuffle);
   use Convert::Bencode_XS qw(bencode bdecode);
+  use Regexp::IPv6 qw($IPv6_re);
+  use Net::IPv6Addr;
+  use LockFile::Simple qw(lock unlock);
+
+  my $IPv4_re='\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}';
 
   my %dispatch = (
     '/announce' => \&resp_tracker
@@ -87,12 +93,34 @@ my %config;
     return if !ref $cgi;
 
     my %data=map{$_ => scalar $cgi->param($_)} $cgi->param;
-    if (exists $data{ip} && $data{ip} !~ /^(\d+\.){3}\d+$/) {
-      delete $data{ip};
-    }
+    map {delete $data{$_}} qw(ip4 port4 ip6 port6);
     $data{connip}=$cgi->remote_host;
-    unless (exists $data{ip}) {
-      $data{ip}=$data{connip};
+    if (exists $data{ipv6} && $data{ipv6} =~ /^($IPv6_re)(?::(\d+))?/) {
+      # valid ipv6 parameter given
+      $data{ip6}=$1;
+      $data{port6}=$2 || $data{port};
+    } elsif ($data{connip} =~ /^$IPv6_re$/) {
+      # no valid ipv6, but have v6 connection source
+      $data{ip6}=$data{connip};
+      $data{port6}=$data{port};
+    }
+    if (exists $data{ip} && $data{ip} =~ /^$IPv4_re$/) {
+      # valid ipv4 parameter given
+      $data{ip4}=$data{ip};
+      $data{port4}=$data{port};
+    } elsif (exists $data{ipv4} && $data{ipv4} =~ /^($IPv4_re)(?::(\d+))?/) {
+      # valid ip parameter given (standard BT)
+      $data{ip4}=$1;
+      $data{port4}=$2 || $data{port};
+    } elsif ($data{connip} =~ /^$IPv4_re$/) {
+      # IPv4 connection source
+      $data{ip4}=$data{connip};
+      $data{port4}=$data{port};
+    }
+    if (!exists $data{ip4} && $data{ip6} =~ /^::ffff:($IPv4_re)$/) {
+      # if we've bound v6, v4 source addresses will look like this
+      $data{ip4}=$1;
+      $data{port4}=$data{port6};
     }
     unless (exists $data{numwant}) {
       $data{numwant}=50;
@@ -109,6 +137,9 @@ my %config;
       bencoded_return($cgi,403,'Forbidden',{'failure reason' => 'No such torrent here'});
       return;
     }
+
+    lock($config{statefile});
+    &restore;
 
     if (exists $state{$data{info_hash}}{peer}{$data{peer_id}}) { # we've seen you before
       if (exists $state{$data{info_hash}}{peer}{$data{peer_id}}{left} &&
@@ -127,10 +158,11 @@ my %config;
     }
 
     &save;
+    unlock($config{statefile});
 
     print $fh join(' ',scalar localtime,
                        'client',
-		       $data{ip},
+		       $data{connip},
                        hexify($data{peer_id}),
                        $data{event} || 'no_event'),"\n";
 
@@ -170,22 +202,40 @@ my %config;
       }
     }
     if (exists $data{compact} && $data{compact}==1) {
-      my $pl='';
+      my $p4='';
+      my $p6='';
       foreach my $p (keys %{$peers}) {
-        $pl .= pack('C*',split /\./,$peers->{$p}{ip});
-        $pl .= pack('n',$peers->{$p}{port});
+        if (exists $peers->{$p}{ip4}) {
+          $p4 .= pack('C*',split /\./,$peers->{$p}{ip4});
+          $p4 .= pack('n',$peers->{$p}{port4});
+        }
+        if (exists $peers->{$p}{ip6}) {
+          my $ip=Net::IPv6Addr->new($peers->{$p}{ip6});
+          $p6 .= pack('n8',$ip->to_intarray);
+          $p6 .= pack('n',$peers->{$p}{port6});
+        }
       }
-      $out{peers}=$pl;
+      $out{peers}=$p4;
+      $out{peers6}=$p6;
     } else {
       my @p;
       foreach my $p (keys %{$peers}) {
-        push @p,{'peer id' => $p,
-                 ip        => $peers->{$p}{ip},
-                 port      => $peers->{$p}{port}};
+        if (exists $peers->{$p}{ip4}) {
+          push @p,{'peer id' => $p,
+                   ip        => $peers->{$p}{ip4},
+                   port      => $peers->{$p}{port4}};
+        }
+        if (exists $peers->{$p}{ip6}) {
+          push @p,{'peer id' => $p,
+                   ip        => $peers->{$p}{ip6},
+                   port      => $peers->{$p}{port6}};
+        }
       }
       $out{peers}=\@p;
     }
-    $out{'external ip'}=pack('C*',split /\./,$data{connip});
+    if ($data{connip} =~ /^$IPv4_re$/) {
+      $out{'external ip'}=pack('C*',split /\./,$data{connip});
+    }
 
 
     print "HTTP/1.0 200 OK\r\n",
@@ -206,6 +256,9 @@ my %config;
 		       $cgi->remote_host),"\n";
     my @rows;
     my @ih;
+    lock($config{statefile});
+    &restore;
+    unlock($config{statefile});
     if (exists $data{info_hash}) {
       if (exists $state{$data{info_hash}}) {
         @ih=($data{info_hash});
@@ -228,11 +281,13 @@ my %config;
         my @pr=$cgi->th([qw(ip complete up down agent)]);
         foreach my $p (keys %{$state{$digest}{peer}}) {
           my $complete=int(100*(1-$state{$digest}{peer}{$p}{left}/$state{$digest}{size}));
-          my $ip=$state{$digest}{peer}{$p}{ip};
-          if (exists $state{$digest}{peer}{$p}{connip} &&
-              $state{$digest}{peer}{$p}{connip} ne $ip) {
-            $ip.="/$state{$digest}{peer}{$p}{connip}";
+          my %ip;
+          foreach my $k (qw(connip ip4 ip6)) {
+            if (exists $state{$digest}{peer}{$p}{$k}) {
+              $ip{$state{$digest}{peer}{$p}{$k}}=1;
+            }
           }
+          my $ip=join('/',sort keys %ip);
           push @pr,$cgi->td([$ip,
                              $complete,
                              $state{$digest}{peer}{$p}{uploaded},
@@ -259,6 +314,9 @@ my %config;
     my %out;
 
     my @ih;
+    lock($config{statefile});
+    &restore;
+    unlock($config{statefile});
     if (exists $data{info_hash}) {
       if (exists $state{$data{info_hash}}) {
         @ih=($data{info_hash});
@@ -311,7 +369,13 @@ my %config;
         %state=%{decode_json($st)};
       }
     }
-    &scan;
+  }
+
+  sub save {
+    my $st=encode_json(\%state);
+    open OUT,">$config{statefile}";
+    print OUT $st;
+    close OUT;
   }
 
   sub scan {
@@ -373,13 +437,6 @@ my %config;
     &save;
   }
 
-  sub save {
-    my $st=encode_json(\%state);
-    open OUT,">$config{statefile}";
-    print OUT $st;
-    close OUT;
-  }
-
   sub simple_return {
     my ($cgi,$status,$text)=@_;
     print "HTTP/1.0 $status $text\r\n",
@@ -411,8 +468,14 @@ my $nbt = NoBrakeTracker->new($config{port});
 if (exists $config{ip}) {
   $nbt->host($config{ip});
 }
+if (exists $config{family} && $config{family} eq 'AF_INET6') {
+  $nbt->family(Socket::AF_INET6);
+}
 $nbt->config(\%config);
+lock($config{statefile});
 $nbt->restore;
+unlock($config{statefile});
+$nbt->scan;
 if (exists $config{pidfile}) {
   my $pid=$nbt->background;
   open PID,">$config{pidfile}" || die "Can't open $config{pidfile} to record pid $pid\n";

@@ -43,12 +43,22 @@ It relies on these non-core modules:
 HTTP::Server::Simple
 JSON
 Digest::SHA1
+Regexp::IPv6
+Net::IPv6Addr
+LockFile::Simple
 Convert::Bencode_XS
 
 All but the last are in Debian/squeeze (libhttp-server-simple-perl,
-libjson-perl, libdigest-sha1-perl). Convert::Bencode_XS can be installed
-via CPAN, or for greater ease use dh-make-perl to create a local deb
-that can be installed via dpkg.
+libjson-perl, libdigest-sha1-perl, libregexp-ipv6-perl,
+libnet-ipv6-addr, liblockfile-simple-perl). Convert::Bencode_XS can be
+installed via CPAN, or for greater ease use dh-make-perl to create a
+local deb that can be installed via dpkg.
+
+If you wish to run with IPv6 support, you will need to patch
+HTTP::Server::Simple. On a Debian/squeeze system, the patch at
+http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=596176 is suitable; if
+you are downloading directly from CPAN, try the patch at
+https://rt.cpan.org/Ticket/Display.html?id=61200 instead.
 
 =Configuration
 
@@ -68,6 +78,9 @@ Elements are:
 ip (optional) - the IP address to bind to (by default, all interfaces)
 
 port (required) - the port number to bind to
+
+family - the address family to bind to ("AF_INET6" will use IPv6; any
+other value will use IPv4)
 
 allowed (required) - the directory containing allowed torrents (which
 must exist), or '*' to track any torrent
@@ -94,6 +107,11 @@ Put torrent files into the "allowed" directory; filenames should end
 with ".torrent". To refresh the list of torrents, send a HUP to the
 tracker process (or just stop and restart it - state is saved after each
 client connection and restored on startup).
+
+If you wish to bind to multiple (but not all) interfaces, multiple
+ports, or multiple address families (IPv4/IPv6), run multiple instances
+of the tracker with different configuration files, all of which specify
+the same statefile.
 
 If a torrent filename ends with ".secret.torrent", it will be excluded
 from /scrape and /stats announcements unless its info-hash is given.
