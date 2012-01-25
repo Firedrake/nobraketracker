@@ -25,13 +25,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 =Features
 
 Supports all basic BitTorrent functionality (BEP3), scraping (no BEP),
-external IP reporting (BEP24), partial seeding (BEP21), and compact peer
-lists (BEP23).
+external IP reporting (BEP24), partial seeding (BEP21), IPv6 (BEP7) and
+compact peer lists (BEP23).
 
 =Updates
 
 http://firedrake.org/cgi-bin/gitweb.cgi?p=nobraketracker.git
-git clone -v git://firedrake.org/nobraketracker.git/ nobraketracker
+git://firedrake.org/nobraketracker.git/
 
 =Prerequisites
 
@@ -101,6 +101,9 @@ logfile (optional) - log to this file rather than STDERR
 
 noscrape (optional) - set to 1 to disable /scrape and /stats reporting.
 
+min_save (optional) - if set, state will be saved no more often than
+this many seconds.
+
 =Operation
 
 Put torrent files into the "allowed" directory; filenames should end
@@ -149,13 +152,15 @@ don't expire.
 
 No UDP-tracker support (BEP15).
 
-No IPv6 support (BEP7).
-
 No SSL support.
 
 No failure-retry support (BEP31).
 
 No peer obfuscation (BEP8).
+
+Single-threaded server copes poorly with high connection load (fixing
+this will need a new backend, probably Net::Server or POE; HTTP server
+code that will run under either of those is welcome).
 
 =Version history
 
@@ -172,6 +177,12 @@ No peer obfuscation (BEP8).
 0.04 - added noscrape config option;
        added secret torrent;
        added info_hash support to /scrape and /stats.
+
+0.05 - added IPv6 support;
+       added timeout for state saving;
+       reads statefile only at startup time;
+       added display of torrent name in /stats (you will need to delete
+         the statefile).
 
 =Reference
 

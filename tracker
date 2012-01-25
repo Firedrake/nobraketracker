@@ -4,7 +4,7 @@ use strict;
 use JSON;
 use LockFile::Simple qw(lock unlock);
 
-my $version='0.04';
+my $version='0.05';
 
 my $cfg=$ARGV[0] || 'tracker.cfg';
 my %config;
@@ -37,6 +37,7 @@ my %config;
   use HTTP::Server::Simple::CGI;
   use base qw(HTTP::Server::Simple::CGI);
   use JSON;
+  use File::Find;
   use Digest::SHA1 qw(sha1);
   use Clone qw(clone);
   use List::Util qw(shuffle);
@@ -46,6 +47,8 @@ my %config;
   use LockFile::Simple qw(lock unlock);
 
   my $IPv4_re='\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}';
+  my $nextsave=time+$config{min_save};
+  my $dirty=0;
 
   my %dispatch = (
     '/announce' => \&resp_tracker
@@ -138,9 +141,6 @@ my %config;
       return;
     }
 
-    lock($config{statefile});
-    &restore;
-
     if (exists $state{$data{info_hash}}{peer}{$data{peer_id}}) { # we've seen you before
       if (exists $state{$data{info_hash}}{peer}{$data{peer_id}}{left} &&
           $state{$data{info_hash}}{peer}{$data{peer_id}}{left} > 0 &&
@@ -157,8 +157,11 @@ my %config;
       $state{$data{info_hash}}{peer}{$data{peer_id}}=\%data;
     }
 
-    &save;
-    unlock($config{statefile});
+    if (time >= $nextsave) {
+      lock($config{statefile});
+      &save;
+      unlock($config{statefile});
+    }
 
     print $fh join(' ',scalar localtime,
                        'client',
@@ -256,9 +259,6 @@ my %config;
 		       $cgi->remote_host),"\n";
     my @rows;
     my @ih;
-    lock($config{statefile});
-    &restore;
-    unlock($config{statefile});
     if (exists $data{info_hash}) {
       if (exists $state{$data{info_hash}}) {
         @ih=($data{info_hash});
@@ -275,7 +275,7 @@ my %config;
         # this is a secret torrent - don't report it in the general list
         # but if we have an info_hash request, we still report
       } else {
-        push @rows,$cgi->td(['info hash',$cgi->pre(hexify($digest))]),
+        push @rows,$cgi->td(['name' => $state{$digest}{name}]),
                    $cgi->td([size => $state{$digest}{size}]),
                    $cgi->td([completed => $state{$digest}{completed}]);
         my @pr=$cgi->th([qw(ip complete up down agent)]);
@@ -314,9 +314,6 @@ my %config;
     my %out;
 
     my @ih;
-    lock($config{statefile});
-    &restore;
-    unlock($config{statefile});
     if (exists $data{info_hash}) {
       if (exists $state{$data{info_hash}}) {
         @ih=($data{info_hash});
@@ -376,6 +373,7 @@ my %config;
     open OUT,">$config{statefile}";
     print OUT $st;
     close OUT;
+    $nextsave=time+$config{min_save};
   }
 
   sub scan {
@@ -383,15 +381,15 @@ my %config;
     if ($config{allowed} eq '*') {
       return;
     }
-    my $d=(opendir D,$config{allowed});
-    unless ($d) {
-      if (ref $cgi) {
-        simple_return($cgi,404,'Not found');
+    my @tfiles;
+    find(sub{
+      if (! -d $_ &&
+          /\.torrent$/i) {
+        push @tfiles,$File::Find::name;
       }
-      return;
-    }
+    },$config{allowed});
     my %found;
-    foreach my $file (map {"$config{allowed}/$_"} grep /\.torrent$/i,readdir D) {
+    foreach my $file (@tfiles) {
       my $secret=0;
       if ($file =~ /\.secret\.torrent$/i) {
         $secret=1;
@@ -411,13 +409,14 @@ my %config;
         $size=$d->{info}{length} || 1;
       }
       my $ih=sha1(bencode($d->{info}));
-      $found{$ih}=[$size,$secret];
+      my $name=$d->{info}{name} || hexify($ih);
+      $found{$ih}=[$size,$secret,$name];
     }
-    closedir D;
     foreach my $f (keys %found) {
       unless (exists $state{$f}) {
         $state{$f}={size => $found{$f}[0],
                     completed => 0,
+                    name => $found{$f}[2],
                     secret => $found{$f}[1]};
 	print $fh join(' ',scalar localtime,
                 	   'torrent',
@@ -470,6 +469,9 @@ if (exists $config{ip}) {
 }
 if (exists $config{family} && $config{family} eq 'AF_INET6') {
   $nbt->family(Socket::AF_INET6);
+}
+unless (exists $config{min_save}) {
+  $config{min_save}=0;
 }
 $nbt->config(\%config);
 lock($config{statefile});
