@@ -4,15 +4,12 @@ use strict;
 use JSON;
 use LockFile::Simple qw(lock unlock);
 
-my $version='0.05';
+my $version='0.06';
 
 my $cfg=$ARGV[0] || 'tracker.cfg';
 my %config;
 {
-  open IN,"<$cfg";
-  if (eof IN) {
-    die "no config file $cfg\n";
-  }
+  open (IN,"<$cfg") || die "no config file $cfg\n";
   binmode IN;
   my $st=join('',<IN>);
   close IN;
@@ -68,7 +65,7 @@ my %config;
     my $c=shift;
     %config=%{$c};
     if (exists $config{logfile}) {
-      open $fh,">>$config{logfile}";
+      open ($fh,">>$config{logfile}") || die "Can't open logfile $config{logfile}\n";
     } else {
       $fh=*STDERR;
     }
@@ -357,20 +354,18 @@ my %config;
   }
 
   sub restore {
-    open IN,"<$config{statefile}" || return;
-    unless (eof IN) {
-      binmode IN;
-      my $st=join('',<IN>);
-      close IN;
-      if ($st) {
-        %state=%{decode_json($st)};
-      }
+    open (IN,"<$config{statefile}") || return;
+    binmode IN;
+    my $st=join('',<IN>);
+    close IN;
+    if ($st) {
+      %state=%{decode_json($st)};
     }
   }
 
   sub save {
     my $st=encode_json(\%state);
-    open OUT,">$config{statefile}";
+    open (OUT,">$config{statefile}") || return;
     print OUT $st;
     close OUT;
     $nextsave=time+$config{min_save};
@@ -394,7 +389,7 @@ my %config;
       if ($file =~ /\.secret\.torrent$/i) {
         $secret=1;
       }
-      open I,"<$file";
+      open (I,"<$file") || next;
       binmode I;
       my $raw=join('',<I>);
       close I;
@@ -480,7 +475,7 @@ unlock($config{statefile});
 $nbt->scan;
 if (exists $config{pidfile}) {
   my $pid=$nbt->background;
-  open PID,">$config{pidfile}" || die "Can't open $config{pidfile} to record pid $pid\n";
+  open (PID,">$config{pidfile}") || die "Can't open $config{pidfile} to record pid $pid\n";
   print PID "$pid\n";
   close PID;
 } else {
