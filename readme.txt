@@ -88,9 +88,6 @@ seconds
 expiry (required) - if a client makes no contact for this many seconds,
 it will no longer be reported to other clients
 
-pidfile (optional) - rather than running in the foreground, daemonise
-the tracker and store its PID in this file
-
 logfile (optional) - log to this file rather than STDERR
 
 noscrape (optional) - set to 1 to disable /scrape reporting.
