@@ -480,12 +480,6 @@ while (1) {
             text => 'Bad Request',
             data => {'failure reason' => 'What?'});
     } elsif ($config{allowed} ne '*' && !exists $state{$r->{data}{info_hash}}) { # valid hash
-open OUT,">jlog";
-print OUT hexify($r->{data}{info_hash}),"\n";
-foreach my $k (keys %state) {
-  print OUT hexify($k),"\n";
-}
-close OUT;
       %out=(mode => 'be',
             http => 403,
             text => 'Forbidden',
