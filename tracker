@@ -4,7 +4,6 @@ use strict;
 use warnings;
 
 use JSON;
-use IO::Select;
 use IO::Handle;
 use Socket;
 use File::Find;
@@ -54,16 +53,17 @@ my %config;
   $PROTOCOL = 0;
 
   my $IPv4_re='\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}';
-  my $nextsave;
-  my $dirty=0;
 
   my %dispatch = (
     '/announce' => \&resp_tracker
   );
 
   if (!exists $config{noscrape}) {
-    $dispatch{'/stats'}=\&resp_stats;
     $dispatch{'/scrape'}=\&resp_scrape;
+  }
+
+  if (!exists $config{nostats}) {
+    $dispatch{'/stats'}=\&resp_stats;
   }
 
   my %state;
@@ -170,15 +170,11 @@ my %config;
                incomplete => 0);
       my @seeds;
       foreach my $p (keys %{$stateih->{peer}}) {
-        if ($stateih->{peer}{$p}{lastupdate}+$config{expiry} < time) {
-          delete $stateih->{peer}{$p};
+        if (!exists $stateih->{peer}{$p}{left} || $stateih->{peer}{$p}{left}==0) {
+          $out{complete}++;
+          push @seeds,$p;
         } else {
-          if (!exists $stateih->{peer}{$p}{left} || $stateih->{peer}{$p}{left}==0) {
-            $out{complete}++;
-            push @seeds,$p;
-          } else {
-            $out{incomplete}++;
-          }
+          $out{incomplete}++;
         }
       }
       my $peers=$stateih->{peer};
@@ -296,10 +292,8 @@ my %config;
 #    print $fh join(' ',scalar localtime,
 #                       $mode,
 #		       $cgi->remote_host),"\n";
-    my $log=join(' ','client',
-		     $data{connip},
-                     main::hexify($data{peer_id}),
-                     $data{event} || 'no_event');
+    my $log=join(' ','stats',
+		     $cgi->remote_host);
 
     my $sockfile="socket.$config{parent}";
     my $sock = IO::Handle->new or die "IO::Handle->new: $1";
@@ -317,7 +311,7 @@ my %config;
     }
     $sock->autoflush;
     $sock->blocking(1);
-    $sock->print(encode_json({mode => 'tracker',log => $log,pid => $$,data => \%data})."\n\n");
+    $sock->print(encode_json({mode => 'stats',log => $log,pid => $$,data => \%data})."\n\n");
     my $j='';
     my $t=1;
     do {
@@ -327,30 +321,78 @@ my %config;
     } while ($t);
 
     my $resp=decode_json($j);
+    my $state=$resp->{data};
+    my @ih;
+    if (exists $data{info_hash}) {
+      if (exists $state->{$data{info_hash}}) {
+        @ih=($data{info_hash});
+      }
+    } else {
+      @ih=keys %{$state};
+    }
+    my @ik=map {lc($state->{$ih[$_]}{name})} (0..$#ih);
+    my @ii=sort {$ik[$a] cmp $ik[$b]} (0..$#ih);
+    @ih=map {$ih[$ii[$_]]} (0..$#ih);
+    my @c1;
+    my @c2;
+    foreach my $digest (@ih) {
+      my $sd=$state->{$digest};
+      my $hd=main::hexify($digest);
 
-    my %out;
+      my %info=(complete => 0,
+                incomplete => 0,
+                downloaders => 0);
+
+      push @c2,$cgi->h2($cgi->a({name => $hd},$sd->{name}));
+      my @r2;
+      while (my ($k,$v) = each %{$sd->{peer}}) {
+        my $complete=int(100*(1-$v->{left}/$sd->{size}));
+        if ($complete<0) {
+          $complete=0;
+        }
+        if ($complete>100) {
+          $complete=100;
+        }
+        my %ip;
+        foreach my $k (qw(connip ip4 ip6)) {
+          if (exists $v->{$k}) {
+            $ip{$v->{$k}}=1;
+          }
+        }
+        my $ip=join('/',keys %ip);
+        push @r2,$cgi->td([$ip,
+                           $complete,
+                           $v->{uploaded},
+                           $v->{downloaded},
+                           $v->{user_agent}]);
+
+        if ($v->{left}==0) {
+          $info{complete}++;
+        } else {
+          $info{incomplete}++;
+        }
+      }
+      my $href;
+      if (@r2) {
+        $href=$cgi->a({href => "#$hd"},$sd->{name});
+        push @c2,$cgi->table($cgi->Tr(\@r2));
+      } else {
+        $href=$sd->{name};
+      }
+      push @c1,$cgi->td([$href,
+                         $hd,
+                         $sd->{repsize},
+                         'S:'.$info{complete},
+                         'L:'.$info{incomplete},
+                         'C:'.$sd->{completed}]);
+    }
 
     print "HTTP/1.0 200 OK\r\n",
           $cgi->header('text/html'),
-          bencode(\%out);
-  }
-
-  sub restore {
-    open (IN,"<$config{statefile}") || return;
-    binmode IN;
-    my $st=join('',<IN>);
-    close IN;
-    if ($st) {
-      %state=%{decode_json($st)};
-    }
-  }
-
-  sub save {
-    my $st=encode_json(\%state);
-    open (OUT,">$config{statefile}") || return;
-    print OUT $st;
-    close OUT;
-    $nextsave=time+$config{min_save};
+          $cgi->start_html,
+          $cgi->table($cgi->Tr(\@c1)),
+          @c2,
+          $cgi->end_html;
   }
 
   sub simple_return {
@@ -381,10 +423,6 @@ if (exists $config{ip}) {
 if (exists $config{family} && $config{family} eq 'AF_INET6') {
   $nbt->family(Socket::AF_INET6);
 }
-unless (exists $config{min_save}) {
-  $config{min_save}=0;
-}
-$config{nextsave}=time+$config{min_save};
 $config{parent}=$$;
 my $fh;
 if (exists $config{logfile}) {
@@ -442,6 +480,12 @@ while (1) {
             text => 'Bad Request',
             data => {'failure reason' => 'What?'});
     } elsif ($config{allowed} ne '*' && !exists $state{$r->{data}{info_hash}}) { # valid hash
+open OUT,">jlog";
+print OUT hexify($r->{data}{info_hash}),"\n";
+foreach my $k (keys %state) {
+  print OUT hexify($k),"\n";
+}
+close OUT;
       %out=(mode => 'be',
             http => 403,
             text => 'Forbidden',
@@ -475,6 +519,12 @@ while (1) {
 	  $peers{$r->{data}{info_hash}}{$r->{data}{peer_id}}{port4}=
 	    $r->{data}{port4};
 	}
+      }
+      while (my ($k,$v)=each %{$state{$r->{data}{info_hash}}{peer}}) {
+        if ($v->{lastupdate}+$config{expiry} < time) {
+          delete $peers{$r->{data}{info_hash}}{$k};
+          delete $state{$r->{data}{info_hash}}{peer}{$k};
+        }
       }
       %out=(mode => 'work',
             data => $peers{$r->{data}{info_hash}});
@@ -520,6 +570,8 @@ while (1) {
       }
     }
     %out=(mode => 'work',data => $data);
+  } elsif ($r->{mode} eq 'stats') {
+    %out=(mode => 'work',data => \%state);
   }
   $talk->print(encode_json(\%out),"\n\n") || die "Child: write failed: $!";
 }
@@ -558,14 +610,27 @@ sub scan {
     }
     my $ih=sha1(bencode($d->{info}));
     my $name=$d->{info}{name} || hexify($ih);
-    $found{$ih}=[$size,$secret,$name];
+    my $repsize=$size;
+    {
+      my $s='';
+      my @suffix=qw(k M G T P E Z Y);
+      while ($repsize > 1024 && @suffix) {
+        $repsize/=1024;
+        $s=shift @suffix;
+      }
+      if ($s) {
+        $repsize=sprintf('%.1f%s',$repsize,$s);
+      }
+    }
+    $found{$ih}=[$size,$repsize,$secret,$name];
   }
   foreach my $f (keys %found) {
     unless (exists $state{$f}) {
       $state{$f}={size => $found{$f}[0],
+                  repsize => $found{$f}[1],
                   completed => 0,
-                  name => $found{$f}[2],
-                  secret => $found{$f}[1]};
+                  name => $found{$f}[3],
+                  secret => $found{$f}[2]};
       print $fh join(' ',scalar localtime,
                 	 'torrent',
                 	 hexify($f),
@@ -591,7 +656,7 @@ sub shutdown {
 
 sub hexify {
   my $value=shift;
-  my @shorts=unpack('n10',$value);
+  my $v=int(length($value)/2+0.5);
+  my @shorts=unpack("n$v",$value);
   return join('',map {sprintf('%04X',$_)} @shorts);
 }
-

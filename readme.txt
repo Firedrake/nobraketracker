@@ -40,25 +40,23 @@ with any reasonably modern Perl.
 
 It relies on these non-core modules:
 
-HTTP::Server::Simple
-JSON
-Digest::SHA1
-Regexp::IPv6
-Net::IPv6Addr
-LockFile::Simple
 Convert::Bencode_XS
+Digest::SHA1
+HTTP::Server::Simple::CGI::PreFork
+IO::Handle
+JSON
+Net::IPv6Addr
+Net::Server
+Regexp::IPv6 qw($IPv6_re)
 
-All but the last are in Debian/squeeze (libhttp-server-simple-perl,
-libjson-perl, libdigest-sha1-perl, libregexp-ipv6-perl,
-libnet-ipv6-addr, liblockfile-simple-perl). Convert::Bencode_XS can be
-installed via CPAN, or for greater ease use dh-make-perl to create a
-local deb that can be installed via dpkg.
+Debian users: many of these are already in Debian/squeeze (ibjson-perl,
+libdigest-sha1-perl, libregexp-ipv6-perl, libnet-ipv6-addr). However,
+you will need to install a more recent Net::Server than squeeze provides
+(minimum 0.99.6.1) if you want IPv6 support, and Convert::Bencode_XS and
+HTTP::Server::Simple::CGI::PreFork are not in Debian at all. On a Debian
+system, install dh-make-perl for automatic building.
 
-If you wish to run with IPv6 support, you will need to patch
-HTTP::Server::Simple. On a Debian/squeeze system, the patch at
-http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=596176 is suitable; if
-you are downloading directly from CPAN, try the patch at
-https://rt.cpan.org/Ticket/Display.html?id=61200 instead.
+Non-Debian users: check your OS's packages and use CPAN as appropriate.
 
 =Configuration
 
@@ -69,7 +67,6 @@ configuration data. A minimal configuration might look like this:
    "port" : 6969,
    "allowed" : "./allowed_torrents",
    "interval" : 1800,
-   "statefile" : "./statefile",
    "expiry" : 3600
 }
 
@@ -88,9 +85,6 @@ must exist), or '*' to track any torrent
 interval (required) - the suggested client reconnection interval, in
 seconds
 
-statefile (required) - the file that will be used to save ongoing
-information
-
 expiry (required) - if a client makes no contact for this many seconds,
 it will no longer be reported to other clients
 
@@ -99,22 +93,15 @@ the tracker and store its PID in this file
 
 logfile (optional) - log to this file rather than STDERR
 
-noscrape (optional) - set to 1 to disable /scrape and /stats reporting.
+noscrape (optional) - set to 1 to disable /scrape reporting.
 
-min_save (optional) - if set, state will be saved no more often than
-this many seconds.
+nostats (optional) - set to 1 to disable /stats reporting.
 
 =Operation
 
-Put torrent files into the "allowed" directory; filenames should end
-with ".torrent". To refresh the list of torrents, send a HUP to the
-tracker process (or just stop and restart it - state is saved after each
-client connection and restored on startup).
-
-If you wish to bind to multiple (but not all) interfaces, multiple
-ports, or multiple address families (IPv4/IPv6), run multiple instances
-of the tracker with different configuration files, all of which specify
-the same statefile.
+Put torrent files into the "allowed" directory or subdirectories
+thereof; filenames should end with ".torrent". To refresh the list of
+torrents, restart the tracker.
 
 If a torrent filename ends with ".secret.torrent", it will be excluded
 from /scrape and /stats announcements unless its info-hash is given.
@@ -125,14 +112,14 @@ There are several URL paths supported:
 
 /announce - normal tracker functionality
 /scrape - standardised scraping
-/stats - list stats and peers for torrents (similar to /scrape, but in
-HTML)
+/stats - list stats and peers for torrents (similar to /scrape, but more
+detail and in HTML)
 
 By analogy with /scrape, /stats takes an optional info_hash parameter to
 restrict reporting to that torrent.
 
 If a peer connects from one IP address but announces another, /stats
-will report the claimed address followed by the connection address.
+will report both.
 
 =Logging
 
@@ -152,15 +139,11 @@ don't expire.
 
 No UDP-tracker support (BEP15).
 
-No SSL support.
+No SSL support. (Potentially available in this server.)
 
 No failure-retry support (BEP31).
 
 No peer obfuscation (BEP8).
-
-Single-threaded server copes poorly with high connection load (fixing
-this will need a new backend, probably Net::Server or POE; HTTP server
-code that will run under either of those is welcome).
 
 =Version history
 
@@ -183,6 +166,10 @@ code that will run under either of those is welcome).
        reads statefile only at startup time;
        added display of torrent name in /stats (you will need to delete
          the statefile).
+
+0.06 - switched to preforking server back-end;
+       removed statefile;
+       split noscrape/nostats.
 
 =Reference
 
